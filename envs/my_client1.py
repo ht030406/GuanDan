@@ -151,54 +151,33 @@ class GDTestClient:
                 # 处理出牌请求
                 self.up_player_played = []
                 self.teammate_played = []
-                self.cards = msg_data.get("cards", [])  #当前手牌
-
-                # 上家出牌
-                up_cards = []
-                last_cards = msg_data.get("lastCards", [])
-                print(last_cards)
-                if isinstance(last_cards, list):
-                    # PASS 情况
-                    if all(isinstance(x, str) and x.upper() == "PASS" for x in last_cards):
-                        up_cards = []
-                    # 正常三段式情况
-                    elif len(last_cards) >= 3 and isinstance(last_cards[2], list):
-                        up_cards = last_cards[2]
-                    else:
-                        up_cards = []
-
-                self.up_player_played = up_cards
-
-                #队友最近出牌
-                teammate_cards = []
-                for p in msg_data.get("publicInfo", []):
-                    if p.get("position") == 2:  # 队友是位置 2
-                        play_area = p.get("playArea")
-                        if isinstance(play_area, list) and len(play_area) >= 3:
-                            teammate_cards = play_area[2]  # 例如 ["S8","S8","C8","CT","ST"]
-                        else:
-                            teammate_cards = []  # 可能是 "pass"
-                        break
-                self.teammate_played = teammate_cards
+                # 当前手牌
+                self.cards = msg_data.get("cards", [])
 
                 #剩余牌数和一轮玩家出牌情况
                 _others_played1, self.remaining_counts_others[0] = extract_player_info(msg_data, 1)
                 _others_played2, self.remaining_counts_others[1] = extract_player_info(msg_data, 2)
                 _others_played3, self.remaining_counts_others[2] = extract_player_info(msg_data, 3)
+                _self_played, _ = extract_player_info(msg_data, 0)
                 self.others_played1 +=_others_played1
                 self.others_played2 +=_others_played2
                 self.others_played3 +=_others_played3
+                #自己出的牌
+                self.played_cards += _self_played
+                #队友本轮出的牌
+                self.teammate_played = _others_played2
+
+                #上家本轮出牌
+                self.up_player_played = _others_played3
 
 
                 actions = msg_data.get("actions", [])
-                print(actions)
                 await self.handle_action_request(actions)
 
             elif operation == "PlayCard":
                 # 处理其他玩家的出牌信息
                 play_position = msg_data.get("position")
                 cards = msg_data.get("cards", [])
-                self.played_cards += cards[2]
                 action = msg_data.get("action", "")
                 if play_position != self.key:
                     if action == "pass":
@@ -229,7 +208,7 @@ class GDTestClient:
                 
                 # 准备开始新的一轮
                 self.cards = []
-                self.remaining_counts_others = []
+                self.remaining_counts_others = np.zeros(3, dtype=np.int16)
                 self.others_played1 = []
                 self.others_played2 = []
                 self.others_played3 = []
@@ -249,7 +228,6 @@ class GDTestClient:
             state, action_mask = convert_message_to_state(
                 actions, self.cards, self.played_cards, self.up_player_played, self.teammate_played, self.others_played1
                              , self.others_played2, self.others_played3, self.remaining_counts_others, self.wild_cards)
-            self.logger.info(f"[DEBUG] state.shape={state.shape}, action_mask.shape={action_mask.shape}")
 
             # agent选择动作
             action_index = self.agent(state, action_mask)
@@ -288,10 +266,10 @@ async def main():
     """
     import argparse
     parser = argparse.ArgumentParser(description='掼蛋游戏测试客户端')
-    parser.add_argument('key', type=str, help='玩家唯一key(如a1、b1、a2、b2)')
+    parser.add_argument('key', type=str,default="a1", help='玩家唯一key(如a1、b1、a2、b2)')
     args = parser.parse_args()
 
-    agent = SimpleAgent(state_dim=436, max_actions=50)  # 54张牌+1轮次
+    agent = SimpleAgent(state_dim=436, max_actions=5000)  # 54张牌+1轮次
     client = GDTestClient(args.key,agent)
     await client.run()
 

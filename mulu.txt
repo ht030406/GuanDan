@@ -1,0 +1,37 @@
+gdrld/                      # 项目根目录
+│
+├── agents/                 # 存放智能体模型与策略
+│   ├── __init__.py
+│   ├── simple_agent.py     # 你已有的SimpleAgent类
+│   └── ppo_agent.py        # PPO算法封装（后续扩展）
+│
+├── envs/                   # 游戏环境/接口
+│   ├── __init__.py
+│   ├── client.py           # 你已有的GDTestClient封装
+│   ├── message2state.py    # convert_message_to_state函数
+│   └── utils.py            # cards_to_vector等工具函数
+│
+├── learner/                # 学习器（集中训练端）
+│   ├── __init__.py
+│   └── learner.py          # PPO训练循环，保存/加载模型
+│
+├── actor/                  # 演员（数据采集端）
+│   ├── __init__.py
+│   └── actor.py            # 调用client，收集(state, action, reward)
+│
+├── storage/                # 数据缓冲与经验池
+│   ├── __init__.py
+│   └── replay_buffer.py    # 简单的RingBuffer / FIFO队列
+│
+├── scripts/                # 启动脚本
+│   ├── run_actor.py        # 启动一个actor（连接服务器）
+│   ├── run_learner.py      # 启动learner进行训练
+│   └── eval_agent.py       # 离线测试/对战
+│
+├── configs/                # 配置文件
+│   └── config.yaml         # 超参配置，比如lr、batch_size等
+│
+├── checkpoints/            # 模型权重保存目录
+│
+├── requirements.txt
+└── README.md

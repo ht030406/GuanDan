@@ -94,13 +94,13 @@ def convert_message_to_state(actions,origin_cards, played_cards, up_player_playe
 
 
     # --- 动作 mask ---
-    action_mask = np.zeros(50, dtype=np.float32)
+    action_mask = np.zeros(5000, dtype=np.float32)
     for a in actions:
         try:
             idx = int(a["index"])  # 这里强制转 int
         except Exception:
             continue
-        if 0 <= idx < 50:
+        if 0 <= idx < 5000:
             action_mask[idx] = 1
 
     return state,action_mask

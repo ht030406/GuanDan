@@ -4,7 +4,7 @@ import torch.nn as nn
 
 
 class SimpleAgent(nn.Module):
-    def __init__(self, state_dim=436, max_actions=50, hidden_size=128, device=None):
+    def __init__(self, state_dim=436, max_actions=5000, hidden_size=128, device=None):
         super(SimpleAgent, self).__init__()
         self.state_dim = int(state_dim)
         self.max_actions = int(max_actions)
