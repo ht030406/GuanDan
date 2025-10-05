@@ -350,7 +350,7 @@ def run_actor(key: str, buffer: ReplayBuffer, learner_http_url: Optional[str] = 
                 loop.run_until_complete(loop.shutdown_asyncgens())
             except Exception:
                 pass
-        winp = client.wincount / 3
+        winp = client.wincount / 100
         print(f"胜率：{winp}")
         with open("game_result.txt", "a") as file:
             # 写入 winlist 和 final_reward 到文件
