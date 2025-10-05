@@ -20,28 +20,28 @@ def setup_logger(key):
     """为每个客户端创建独立的日志配置"""
     logger = logging.getLogger(f'test_client_{key}')
     
-    # 如果logger已经有处理器，说明已经配置过，直接返回
-    if logger.handlers:
-        return logger
-        
-    logger.setLevel(logging.INFO)
-    
-    # 创建文件处理器，使用key作为文件名
-    file_handler = logging.FileHandler(f'test_client_{key}.log')
-    file_handler.setLevel(logging.INFO)
-    
-    # 创建控制台处理器
-    console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setLevel(logging.INFO)
-    
-    # 创建格式化器
-    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
-    file_handler.setFormatter(formatter)
-    console_handler.setFormatter(formatter)
-    
-    # 添加处理器到日志记录器
-    logger.addHandler(file_handler)
-    logger.addHandler(console_handler)
+    # # 如果logger已经有处理器，说明已经配置过，直接返回
+    # if logger.handlers:
+    #     return logger
+    #
+    # logger.setLevel(logging.INFO)
+    #
+    # # 创建文件处理器，使用key作为文件名
+    # file_handler = logging.FileHandler(f'test_client_{key}.log')
+    # file_handler.setLevel(logging.INFO)
+    #
+    # # 创建控制台处理器
+    # console_handler = logging.StreamHandler(sys.stdout)
+    # console_handler.setLevel(logging.INFO)
+    #
+    # # 创建格式化器
+    # formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+    # file_handler.setFormatter(formatter)
+    # console_handler.setFormatter(formatter)
+    #
+    # # 添加处理器到日志记录器
+    # logger.addHandler(file_handler)
+    # logger.addHandler(console_handler)
     
     return logger
 

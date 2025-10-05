@@ -25,7 +25,56 @@ from Agent.agent import SimpleAgent, PPOAgent
 from storage.replay_buffer import ReplayBuffer
 from Agent.message2state import convert_message_to_state  # your state conversion
 
-# If your SimpleAgent is in another path, adjust import accordingly.
+def calculate_reward(rankings):
+    """
+    根据排名情况计算奖励值。
+    :param rankings: 列表，包含四个人的排名 [rank1, rank2, rank3, rank4]
+    :return: 计算得到的奖励值
+    """
+    # 假设队伍的索引是 0 和 2
+    team1_rank = rankings[0]  # 你的队伍第一个位置的排名
+    team2_rank = rankings[2]  # 你的队伍第二个位置的排名
+
+    # 1. 胜利情况
+    if (team1_rank == 1 and team2_rank in [2, 3, 4]) or (team1_rank in [2, 3, 4] and team2_rank == 1):
+        # 队伍胜利，根据不同排名返回不同奖励
+        if team1_rank == 1 and team2_rank == 2:
+            return 5
+        elif team1_rank == 1 and team2_rank == 3:
+            return 3
+        elif team1_rank == 1 and team2_rank == 4:
+            return 2
+        elif team2_rank == 1 and team1_rank == 2:
+            return 5
+        elif team2_rank == 1 and team1_rank == 3:
+            return 3
+        elif team2_rank == 1 and team1_rank == 4:
+            return 2
+
+    # 2. 失败情况
+    elif (team1_rank == 4 and team2_rank in [2, 3, 4]) or (team2_rank == 4 and team1_rank in [2, 3, 4]):
+        # 队伍失败，根据不同排名返回不同负奖励
+        if team1_rank == 4 and team2_rank == 3:
+            return -1
+        elif team1_rank == 4 and team2_rank == 2:
+            return -0.5
+        elif team1_rank == 3 and team2_rank == 4:
+            return -1
+        elif team1_rank == 2 and team2_rank == 4:
+            return -0.5
+        elif team2_rank == 4 and team1_rank == 3:
+            return -1
+        elif team2_rank == 4 and team1_rank == 2:
+            return -0.5
+        elif team1_rank == 4 and team2_rank == 4:
+            return -2
+
+    # 3. 平局情况
+    elif (team1_rank == 2 and team2_rank == 3) or (team1_rank == 3 and team2_rank == 2):
+        return 0
+
+    # 如果没有符合的情况，可以返回 0 或其他默认奖励
+    return 0
 
 # -------------------------
 # Actor class (subclass GDTestClient)
@@ -47,6 +96,7 @@ class RLActorClient(GDTestClient):
         self._pending_lock = threading.Lock()
         # configure how many pending we keep before flushing when no reward arrives
         self.pending_timeout = 10.0  # seconds
+        self.wincount = 0
 
     # override: when server requests action, record the chosen action as pending
     async def handle_action_request(self, actions: List[Dict[str, Any]]):
@@ -159,8 +209,19 @@ class RLActorClient(GDTestClient):
 
             elif operation == "GameResult":
                 # finalize any remaining pending transitions as terminal with final reward if provided
-                final_reward = float(msg_data.get("final_reward", 0.0)) if msg_data.get("final_reward") is not None else 0.0
                 done = True
+                # 计算奖励
+                winlist = msg_data.get("winList", [])
+                final_reward = calculate_reward(winlist)
+
+                print(f"GameResult - Final Rank: {winlist}, Final Reward: {final_reward}")
+                if final_reward > 0:
+                    self.wincount += 1
+
+                # 打开文件进行写入，如果文件不存在会自动创建
+                with open("game_result.txt", "a") as file:
+                    # 写入 winlist 和 final_reward 到文件
+                    file.write(f"GameResult - Final Rank: {winlist}, Final Reward: {final_reward}\n")
                 # build next_obs as empty or from msg_data
                 try:
                     next_state, _ = convert_message_to_state(msg_data, msg_data.get("cards", []), self.played_cards,
@@ -266,30 +327,41 @@ class RLActorClient(GDTestClient):
 # -------------------------
 # Convenience runner
 # -------------------------
-def run_actor(key: str, buffer: ReplayBuffer, learner_http_url: Optional[str] = None, device: str = 'cpu'):
+def run_actor(key: str, buffer: ReplayBuffer, learner_http_url: Optional[str] = None, device: str = 'cuda:0'):
     """
     Instantiate agent and actor client, then run the asyncio loop.
     """
-    # agent = SimpleAgent(state_dim=436, max_actions=1000, device=device)
+    agent = PPOAgent(state_dim=436, action_dim=1000, device=device)
+    for i in range(500):
+        # 启动训练平台，相当于在命令行执行 ./GdAITest
+        time.sleep(0.5)
+        subprocess.Popen(["./GdAITest"])
+        time.sleep(1)
+        client = RLActorClient(key=key, agent=agent, buffer=buffer, learner_http_url=learner_http_url)
 
-    # 启动训练平台，相当于在命令行执行 ./GdAITest
-    subprocess.Popen(["./GdAITest"])
-    time.sleep(0.5)
-    agent = PPOAgent(state_dim=436, action_dim=1000 ,device=device)
-    agent.load_weights("/home/tao/Competition/AI_GuanDan/训练平台/GdAITest_package/GuanDan/learner/checkpoints/ppo_latest_model.pth", map_location=device)
-    client = RLActorClient(key=key, agent=agent, buffer=buffer, learner_http_url=learner_http_url)
-
-    # run client loop
-    loop = asyncio.get_event_loop()
-    try:
-        loop.run_until_complete(client.run())
-    except KeyboardInterrupt:
-        print("Interrupted")
-    finally:
+        # run client loop
+        loop = asyncio.get_event_loop()
         try:
-            loop.run_until_complete(loop.shutdown_asyncgens())
-        except Exception:
-            pass
+            loop.run_until_complete(client.run())
+        except KeyboardInterrupt:
+            print("Interrupted")
+        finally:
+            try:
+                loop.run_until_complete(loop.shutdown_asyncgens())
+            except Exception:
+                pass
+        winp = client.wincount / 3
+        print(f"胜率：{winp}")
+        with open("game_result.txt", "a") as file:
+            # 写入 winlist 和 final_reward 到文件
+            file.write(f"GameResult - 胜率：{winp}\n")
+        #加载最近一次更新的模型权重
+        agent.load_weights(
+            "/home/tao/Competition/AI_GuanDan/训练平台/GdAITest_package/GuanDan/learner/checkpoints/ppo_latest_model.pth",
+            map_location=device)
+        if winp > 0.9:
+            break
+        time.sleep(0.5)
 
 
 if __name__ == "__main__":

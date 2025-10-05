@@ -500,6 +500,10 @@ class PPOLearner:
 
             print(f"[Learner] Update {self.updates}: policy_loss={stats['policy_loss']:.4f}, "
                   f"value_loss={stats['value_loss']:.4f}, entropy={stats['entropy']:.4f}, samples={len(prepared['actions'])}")
+            with open("train_result.txt", "a") as file:
+                # 写入 policy_loss value_loss 和 entropy 到文件
+                file.write(
+                    f"TrainResult - Policy_loss: {stats['policy_loss']:.4f}, Value_loss: {stats['value_loss']:.4f}, Entropy: {stats['entropy']:.4f}\n")
 
             # save periodically
             if self.updates % save_every == 0:
