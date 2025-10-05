@@ -1,0 +1,26 @@
+{
+    "gameSettings": {
+        "totalRounds": 10,    						// 总小局数（非升级模式下）
+        "timeoutSeconds": 0, 						// 每次出牌的超时时间（秒），0为不限时
+        "logLevel": "Info", 						// 日志级别（Off\Error\Warn\Info\Debug）
+        "logPath": "./logs", 						// 日志文件路径
+        "wsEndpoint": "http://localhost:23456/", 	// WebSocket服务端监听地址
+        "aiNum": 1, 								// 外部用户数量（0~4）
+		"cardFormat": "chinese",  					// 牌格式（all/number/letter/chinese）
+		"delayBetweenPlays": 0,  					// 每次出牌后的延迟（毫秒）
+		"allowRetry": true,							// 出牌不合法时是否允许重试
+		"rankOption": 0,   							// 0: 固定级牌, 1: 随机级牌, 2: 升级模式
+		"matchCount": 2,							// 升级模式下的大局数
+		"enableHeartbeat": false,					// 心跳开关
+		"heartbeatInterval": 100,					// 心跳间隔
+		"heartbeatTimeout": 3,						// 心跳超时次数
+		"requireMsgIndexResponse": false, 			// 是否要求客户端回复消息索引
+		"waitForReconnect": true					// 是否等待断线重连
+    },
+	"userKeyMap": {
+    "a1": 0, // key为a1的用户对应位置0
+    "b1": 1, // key为b1的用户对应位置1
+    "a2": 2, // key为a2的用户对应位置2
+    "b2": 3  // key为b2的用户对应位置3
+  }
+}

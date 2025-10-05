@@ -19,8 +19,9 @@ import time
 import threading
 from typing import List, Dict, Any, Optional
 from envs.my_client1 import GDTestClient  # preferred location based on earlier plan
+import subprocess
 
-from Agent.agent import SimpleAgent
+from Agent.agent import SimpleAgent, PPOAgent
 from storage.replay_buffer import ReplayBuffer
 from Agent.message2state import convert_message_to_state  # your state conversion
 
@@ -35,7 +36,7 @@ class RLActorClient(GDTestClient):
     It overrides handle_action_request and handle_message to record pending transitions
     and finalize them when rewards arrive.
     """
-    def __init__(self, key: str, agent: SimpleAgent, buffer: ReplayBuffer,
+    def __init__(self, key: str, agent: PPOAgent, buffer: ReplayBuffer,
                  learner_http_url: Optional[str] = None):
         super().__init__(key, agent)
         self.replay_buffer = buffer
@@ -151,7 +152,6 @@ class RLActorClient(GDTestClient):
                         }
                         # push to buffer
                         self.replay_buffer.add(transition)
-                        print(transition)
                         self.logger.info(f"[Actor] pushed transition (reward={reward}) to buffer (buffer_size={len(self.replay_buffer)})")
                         # optionally upload to learner over HTTP if configured (implement Learner endpoint)
                         if self.learner_http_url:
@@ -270,7 +270,13 @@ def run_actor(key: str, buffer: ReplayBuffer, learner_http_url: Optional[str] = 
     """
     Instantiate agent and actor client, then run the asyncio loop.
     """
-    agent = SimpleAgent(state_dim=436, max_actions=5000, device=device)
+    # agent = SimpleAgent(state_dim=436, max_actions=1000, device=device)
+
+    # 启动训练平台，相当于在命令行执行 ./GdAITest
+    subprocess.Popen(["./GdAITest"])
+    time.sleep(0.5)
+    agent = PPOAgent(state_dim=436, action_dim=1000 ,device=device)
+    agent.load_weights("/home/tao/Competition/AI_GuanDan/训练平台/GdAITest_package/GuanDan/learner/checkpoints/ppo_latest_model.pth", map_location=device)
     client = RLActorClient(key=key, agent=agent, buffer=buffer, learner_http_url=learner_http_url)
 
     # run client loop

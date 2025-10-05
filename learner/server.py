@@ -47,13 +47,13 @@ from learner import PPOLearner
 # Configurable params
 HTTP_HOST = "0.0.0.0"
 HTTP_PORT = 8000
-SAMPLES_PER_UPDATE = 2048
+SAMPLES_PER_UPDATE = 100
 FETCH_INTERVAL = 1.0
 TOTAL_UPDATES = 10000
-SAVE_EVERY = 50
+SAVE_EVERY = 20
 DEVICE = "cpu"
 STATE_DIM = 436
-ACTION_DIM = 50
+ACTION_DIM = 1000
 
 app = FastAPI(title="LearnerReceiver")
 buffer = ReplayBuffer()

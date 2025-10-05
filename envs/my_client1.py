@@ -269,7 +269,7 @@ async def main():
     parser.add_argument('key', type=str,default="a1", help='玩家唯一key(如a1、b1、a2、b2)')
     args = parser.parse_args()
 
-    agent = SimpleAgent(state_dim=436, max_actions=5000)  # 54张牌+1轮次
+    agent = SimpleAgent(state_dim=436, max_actions=1000)  # 54张牌+1轮次
     client = GDTestClient(args.key,agent)
     await client.run()
 

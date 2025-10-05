@@ -22,6 +22,7 @@ import os
 import time
 import math
 from typing import Dict, Any, Optional
+import shutil
 
 import numpy as np
 import torch
@@ -30,21 +31,28 @@ import torch.optim as optim
 
 from storage.replay_buffer import ReplayBuffer
 
-
 # ---------------------------
 # Policy-Value network
 # ---------------------------
+# 替换 learner/learner.py 中的 PolicyValueNet 为下面代码
 class PolicyValueNet(nn.Module):
-    def __init__(self, state_dim: int, action_dim: int, hidden_size: int = 256):
+    def __init__(self, state_dim: int, action_dim: int,
+                 hidden_sizes: tuple = (256, 256, 128, 64)):
         super().__init__()
+        hs = list(hidden_sizes)
+        assert len(hs) == 4, "hidden_sizes must be 4-tuple"
         self.net = nn.Sequential(
-            nn.Linear(state_dim, hidden_size),
+            nn.Linear(state_dim, hs[0]),
             nn.ReLU(),
-            nn.Linear(hidden_size, hidden_size),
+            nn.Linear(hs[0], hs[1]),
+            nn.ReLU(),
+            nn.Linear(hs[1], hs[2]),
+            nn.ReLU(),
+            nn.Linear(hs[2], hs[3]),
             nn.ReLU()
         )
-        self.policy_head = nn.Linear(hidden_size, action_dim)
-        self.value_head = nn.Linear(hidden_size, 1)
+        self.policy_head = nn.Linear(hs[3], action_dim)
+        self.value_head = nn.Linear(hs[3], 1)
 
     def forward(self, x: torch.Tensor):
         """
@@ -173,32 +181,113 @@ class PPOLearner:
         dones = np.asarray(data.get('done')).astype(np.float32)
 
         # optional
-        masks = data.get('mask', None)  # shape (N, A)
-        old_logp = np.asarray(data.get('logp')) if data.get('logp') is not None else None
-        old_value = np.asarray(data.get('value')) if data.get('value') is not None else None
+        masks = data.get('mask', None)  # shape (N, A) or None
+        old_logp = data.get('logp', None)
+        old_value = data.get('value', None)
 
-        # convert to tensors
-        obs_t = torch.tensor(obs, dtype=torch.float32, device=self.device)
-        actions_t = torch.tensor(actions, dtype=torch.long, device=self.device)
-        rewards_t = torch.tensor(rewards, dtype=torch.float32, device=self.device)
-        dones_t = torch.tensor(dones, dtype=torch.float32, device=self.device)
+        # --- normalize obs/actions/rewards/dones ---
+        try:
+            obs_t = torch.tensor(np.asarray(obs, dtype=np.float32), dtype=torch.float32, device=self.device)
+        except Exception as e:
+            # provide helpful debug info
+            self.logger.error(f"[prepare_batch] failed to convert obs to float32 array: type={type(obs)}, sample0={str(obs)[:200]}, err={e}")
+            raise
 
+        try:
+            actions_t = torch.tensor(np.asarray(actions, dtype=np.int64), dtype=torch.long, device=self.device)
+        except Exception as e:
+            self.logger.error(f"[prepare_batch] failed to convert actions to int64: sample={str(actions)[:200]}, err={e}")
+            raise
+
+        try:
+            rewards_t = torch.tensor(np.asarray(rewards, dtype=np.float32), dtype=torch.float32, device=self.device)
+        except Exception as e:
+            self.logger.error(f"[prepare_batch] failed to convert rewards to float32: sample={str(rewards)[:200]}, err={e}")
+            raise
+
+        try:
+            dones_t = torch.tensor(np.asarray(dones, dtype=np.float32), dtype=torch.float32, device=self.device)
+        except Exception as e:
+            self.logger.error(f"[prepare_batch] failed to convert dones to float32: sample={str(dones)[:200]}, err={e}")
+            raise
+
+        # --- masks ---
+        masks_t = None
         if masks is not None:
-            masks_t = torch.tensor(np.asarray(masks), dtype=torch.float32, device=self.device)
-            if masks_t.ndim == 1:
-                masks_t = masks_t.unsqueeze(0)
-        else:
-            masks_t = None
+            try:
+                masks_arr = np.asarray(masks)
+                # if masks is 1-D for single sample, expand to 2D
+                if masks_arr.ndim == 1:
+                    masks_arr = masks_arr.reshape(1, -1)
+                masks_t = torch.tensor(masks_arr.astype(np.float32), dtype=torch.float32, device=self.device)
+            except Exception as e:
+                # best-effort: try to coerce each mask row to list of ints
+                try:
+                    normalized = []
+                    for i, row in enumerate(masks):
+                        try:
+                            normalized.append(np.asarray(row, dtype=np.float32))
+                        except Exception:
+                            # fallback: build zero mask with expected action_dim if available
+                            normalized.append(np.zeros(self.action_dim, dtype=np.float32))
+                            self.logger.warning(f"[prepare_batch] could not parse mask row {i}, using zeros")
+                    masks_arr = np.stack(normalized, axis=0)
+                    masks_t = torch.tensor(masks_arr, dtype=torch.float32, device=self.device)
+                except Exception as e2:
+                    self.logger.error(f"[prepare_batch] failed to parse masks: err1={e}, err2={e2}")
+                    masks_t = None
 
-        if old_logp is not None:
-            old_logp_t = torch.tensor(old_logp, dtype=torch.float32, device=self.device)
-        else:
-            old_logp_t = None
+        # --- old_logp and old_value: robust conversion from possibly object-dtype arrays ---
+        def _to_float_tensor(candidate, name, fill_value=0.0):
+            if candidate is None:
+                return None
+            # Try direct numpy conversion first
+            try:
+                arr = np.asarray(candidate)
+            except Exception:
+                # fallback: try to iterate and build list
+                try:
+                    arr = np.array([x for x in candidate])
+                except Exception:
+                    self.logger.error(f"[prepare_batch] cannot convert {name} to numpy array; returning None")
+                    return None
 
-        if old_value is not None:
-            old_value_t = torch.tensor(old_value, dtype=torch.float32, device=self.device)
-        else:
-            old_value_t = None
+            # If object dtype, convert elementwise
+            if arr.dtype == np.dtype('O'):
+                flat = []
+                bad_idx = []
+                for i, v in enumerate(arr):
+                    try:
+                        if v is None:
+                            flat.append(float(fill_value))
+                        else:
+                            flat.append(float(v))
+                    except Exception:
+                        # try to handle numpy scalar etc.
+                        try:
+                            flat.append(float(np.asarray(v).item()))
+                        except Exception:
+                            flat.append(float(fill_value))
+                            bad_idx.append(i)
+                if bad_idx:
+                    self.logger.warning(f"[prepare_batch] {name} contains {len(bad_idx)} non-numeric entries; indices sample: {bad_idx[:5]}")
+                arr = np.asarray(flat, dtype=np.float32)
+            else:
+                # ensure numeric dtype
+                try:
+                    arr = arr.astype(np.float32)
+                except Exception:
+                    # final fallback: convert itemwise
+                    arr = np.array([float(x) if x is not None else fill_value for x in arr], dtype=np.float32)
+            # convert to tensor
+            try:
+                return torch.tensor(arr, dtype=torch.float32, device=self.device)
+            except Exception as e:
+                self.logger.error(f"[prepare_batch] failed to convert {name} array to tensor: err={e}, sample={str(arr)[:200]}")
+                return None
+
+        old_logp_t = _to_float_tensor(old_logp, "old_logp", fill_value=0.0)
+        old_value_t = _to_float_tensor(old_value, "old_value", fill_value=0.0)
 
         return {
             'obs': obs_t,
@@ -312,13 +401,34 @@ class PPOLearner:
         }
 
     def save(self, prefix: str = "ppo"):
-        fname = os.path.join(self.save_dir, f"{prefix}_step{self.updates}.pth")
+        """
+        Save both a full checkpoint and a model-only state_dict.
+        Returns path to the 'latest' model-only file.
+        """
+        # full checkpoint (for resume)
+        ckpt_fname = os.path.join(self.save_dir, f"{prefix}_step{self.updates}.pth")
         torch.save({
             'model_state': self.model.state_dict(),
             'optimizer_state': self.optimizer.state_dict(),
             'updates': self.updates
-        }, fname)
-        return fname
+        }, ckpt_fname)
+
+        # model-only file (overwrite latest)
+        model_only_fname = os.path.join(self.save_dir, f"{prefix}_step{self.updates}_model.pth")
+        torch.save(self.model.state_dict(), model_only_fname)
+
+        latest_target = os.path.join(self.save_dir, f"{prefix}_latest_model.pth")
+        try:
+            # atomic-ish replace (copy then move)
+            shutil.copyfile(model_only_fname, latest_target)
+        except Exception:
+            try:
+                shutil.move(model_only_fname, latest_target)
+            except Exception:
+                # last resort: leave model_only_fname as is
+                pass
+
+        return latest_target
 
     def load(self, path: str):
         ckpt = torch.load(path, map_location=self.device)
