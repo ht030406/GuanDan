@@ -96,12 +96,12 @@ async def upload_trajectories(payload: UploadModel):
             "obs": list(t.obs) if t.obs is not None else [],
             "action": int(t.action) if t.action is not None else 0,
             "reward": float(t.reward) if t.reward is not None else 0.0,
-            "next_obs": list(t.next_obs) if t.next_obs is not None else [],
+            #"next_obs": list(t.next_obs) if t.next_obs is not None else [],
             "done": bool(t.done) if t.done is not None else False,
-            "logp": float(t.logp) if t.logp is not None else None,
-            "value": float(t.value) if t.value is not None else None,
-            "mask": list(t.mask) if t.mask is not None else None,
-            "meta": t.meta or {}
+            #"logp": float(t.logp) if t.logp is not None else None,
+            #"value": float(t.value) if t.value is not None else None,
+            #"mask": list(t.mask) if t.mask is not None else None,
+            #"meta": t.meta or {}
         }
         transitions.append(transition)
 

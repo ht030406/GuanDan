@@ -441,6 +441,25 @@ class PPOLearner:
         self.updates = ckpt.get('updates', 0)
         return self
 
+    # --- DEBUG SNIPPET: 放在 prepare_batch(prepared) 之后，ppo_update 之前 ---
+    def _debug_batch(self, prepared):
+        import numpy as _np, torch as _torch
+        print("=== DEBUG BATCH ===")
+        print("num samples:", prepared['obs'].shape[0])
+        if prepared['rewards'] is not None:
+            r = prepared['rewards'].cpu().numpy()
+            print("rewards: mean %.6f std %.6f min %.6f max %.6f" % (r.mean(), r.std(), r.min(), r.max()))
+        if prepared['dones'] is not None:
+            d = prepared['dones'].cpu().numpy()
+            print("dones: unique", _np.unique(d))
+        if prepared.get('old_logp') is not None:
+            ol = prepared['old_logp'].cpu().numpy()
+            print("old_logp: mean %.6e std %.6e" % (ol.mean(), ol.std()))
+        if prepared.get('old_value') is not None:
+            ov = prepared['old_value'].cpu().numpy()
+            print("old_value: mean %.6e std %.6e" % (ov.mean(), ov.std()))
+        print("===================")
+
     def train(self,
               total_updates: int = 1000,
               fetch_interval: float = 1.0,
@@ -497,6 +516,7 @@ class PPOLearner:
 
             # call update (this function does multiple epochs internally)
             stats = self.ppo_update(prepared)
+            self._debug_batch(prepared)
 
             print(f"[Learner] Update {self.updates}: policy_loss={stats['policy_loss']:.4f}, "
                   f"value_loss={stats['value_loss']:.4f}, entropy={stats['entropy']:.4f}, samples={len(prepared['actions'])}")
