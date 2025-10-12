@@ -5,7 +5,7 @@
         "logLevel": "Info", 						// 日志级别（Off\Error\Warn\Info\Debug）
         "logPath": "./logs", 						// 日志文件路径
         "wsEndpoint": "http://localhost:23456/", 	// WebSocket服务端监听地址
-        "aiNum": 1, 								// 外部用户数量（0~4）
+        "aiNum": 2, 								// 外部用户数量（0~4）
 		"cardFormat": "chinese",  					// 牌格式（all/number/letter/chinese）
 		"delayBetweenPlays": 0,  					// 每次出牌后的延迟（毫秒）
 		"allowRetry": true,							// 出牌不合法时是否允许重试

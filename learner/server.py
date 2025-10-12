@@ -49,7 +49,7 @@ HTTP_HOST = "0.0.0.0"
 HTTP_PORT = 8000
 SAMPLES_PER_UPDATE = 100
 FETCH_INTERVAL = 1.0
-TOTAL_UPDATES = 10000
+TOTAL_UPDATES = 30000
 SAVE_EVERY = 20
 DEVICE = "cuda:0"
 STATE_DIM = 436
@@ -142,6 +142,7 @@ def start_learner_training(buffer: ReplayBuffer,
     """
     learner = PPOLearner(state_dim=state_dim, action_dim=action_dim, buffer=buffer, device=device,
                          save_every_updates=save_every)
+    learner.load("/home/tao/Competition/AI_GuanDan/训练平台/GdAITest_package/GuanDan/learner/checkpoints/ppo_step9980.pth",)
     print("[Learner] Starting training loop")
     learner.train(total_updates=total_updates, fetch_interval=fetch_interval,
                   samples_per_update=samples_per_update, save_every=save_every)

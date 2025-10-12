@@ -7,7 +7,7 @@ import logging
 import sys
 import os
 from typing import List, Dict, Any
-from Agent.agent import SimpleAgent
+from Agent.agent import SimpleAgent, PPOAgent
 from Agent.message2state import convert_message_to_state    #调用状态转换函数
 
 CARD_ORDER = ['H2', 'C2', 'S2', 'D2', 'H3', 'C3', 'S3', 'D3', 'H4', 'C4', 'S4', 'D4',
@@ -269,7 +269,10 @@ async def main():
     parser.add_argument('key', type=str,default="a1", help='玩家唯一key(如a1、b1、a2、b2)')
     args = parser.parse_args()
 
-    agent = SimpleAgent(state_dim=436, max_actions=1000)  # 54张牌+1轮次
+    agent = PPOAgent(state_dim=436, action_dim=1000)  # 54张牌+1轮次
+    agent.load_weights(
+        "/home/tao/Competition/AI_GuanDan/训练平台/GdAITest_package/GuanDan/learner/checkpoints/ppo_latest_model_a1.pth",
+        map_location='cpu')
     client = GDTestClient(args.key,agent)
     await client.run()
 

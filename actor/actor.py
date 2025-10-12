@@ -25,52 +25,22 @@ from Agent.agent import SimpleAgent, PPOAgent
 from storage.replay_buffer import ReplayBuffer
 from Agent.message2state import convert_message_to_state  # your state conversion
 
+PAYOFF = {
+    (1,2): 10, (2,1): 8, (1,3): 10, (3,1): 6, (1,4): 10, (4,1): 0,
+    (2,3): 0, (3,2): 0,
+    (4,4): -10, (4,3): -10, (3,4): -10, (4,2): -8, (2,4): -8
+}
+# 归一化
+vals = list(PAYOFF.values())
+minv, maxv = min(vals), max(vals)
 def calculate_reward(rankings):
-    """
-    根据排名情况计算奖励值。
-    :param rankings: 列表，包含四个人的排名 [rank1, rank2, rank3, rank4]
-    :return: 计算得到的奖励值
-    """
-    # 假设队伍的索引是 0 和 2
-    team1_rank = rankings[0]  # 你的队伍第一个位置的排名
-    team2_rank = rankings[2]  # 你的队伍第二个位置的排名
+    key = (rankings[0], rankings[2])
+    raw = PAYOFF.get(key, 0)
+    # map raw from [minv,maxv] to [-1,1]
+    if maxv == minv:
+        return 0.0
+    return 5*(2*(raw - minv)/(maxv - minv) - 1.0)
 
-    # 1. 胜利情况
-    if (team1_rank == 1 and team2_rank in [2, 3, 4]) or (team1_rank in [2, 3, 4] and team2_rank == 1):
-        # 队伍胜利，根据不同排名返回不同奖励
-        if team1_rank == 1 and team2_rank == 2:
-            return 10
-        elif team1_rank == 1 and team2_rank == 3:
-            return 10
-        elif team1_rank == 1 and team2_rank == 4:
-            return 10
-        elif team2_rank == 1 and team1_rank == 2:
-            return 6
-        elif team2_rank == 1 and team1_rank == 3:
-            return 4
-        elif team2_rank == 1 and team1_rank == 4:
-            return 0
-
-    # 2. 失败情况
-    elif (team1_rank == 4 and team2_rank in [2, 3, 4]) or (team2_rank == 4 and team1_rank in [2, 3, 4]):
-        # 队伍失败，根据不同排名返回不同负奖励
-        if team1_rank == 4 and team2_rank == 3:
-            return -10
-        elif team1_rank == 4 and team2_rank == 2:
-            return -8
-        elif team1_rank == 3 and team2_rank == 4:
-            return -7
-        elif team1_rank == 2 and team2_rank == 4:
-            return -2
-        elif team1_rank == 4 and team2_rank == 4:
-            return -20
-
-    # 3. 平局情况
-    elif (team1_rank == 2 and team2_rank == 3) or (team1_rank == 3 and team2_rank == 2):
-        return 0
-
-    # 如果没有符合的情况，可以返回 0 或其他默认奖励
-    return 0
 
 # -------------------------
 # Actor class (subclass GDTestClient)
@@ -130,9 +100,9 @@ class RLActorClient(GDTestClient):
                 "obs": state.astype(float).tolist() if hasattr(state, "astype") else state,
                 "action": int(action_index),
                 "mask": action_mask.tolist() if hasattr(action_mask, "tolist") else action_mask,
-                "logp": None,
-                "value": None,
-                "timestamp": time.time()
+                # "logp": None,
+                # "value": None,
+                # "timestamp": time.time()
             }
             with self._pending_lock:
                 self._pending_actions.append(pending)
@@ -158,52 +128,34 @@ class RLActorClient(GDTestClient):
             await super().handle_message(message)
 
             # now post-process certain messages
-            if operation in ("RequestAction", "Reward"):
+            if operation == "RequestAction":
                 # many servers send immediate reward info here
-                actions = msg_data.get("actions", [])
+                # actions = msg_data.get("actions", [])
                 reward = 0
                 done = bool(msg_data.get("done", False))
-                # next obs: we can convert current message to next state
-                # try:
-                #     next_state, next_mask = convert_message_to_state(
-                #         actions,
-                #         # Use current stored fields if needed; convert_message_to_state should be robust
-                #         self.cards,
-                #         self.played_cards,
-                #         self.up_player_played,
-                #         self.teammate_played,
-                #         self.others_played1,
-                #         self.others_played2,
-                #         self.others_played3,
-                #         self.remaining_counts_others,
-                #         self.wild_cards
-                #     )
-                #     next_obs_serial = next_state.astype(float).tolist() if hasattr(next_state, "astype") else next_state
-                # except Exception:
-                #     next_obs_serial = []
 
                 # finalize the oldest pending (FIFO)
-                # with self._pending_lock:
-                #     if self._pending_actions:
-                #         p = self._pending_actions.pop(0)
-                #         self.latest_pending = p
-                #         transition = {
-                #             "obs": p["obs"],
-                #             "action": p["action"],
-                #             # "reward": float(reward),
-                #             # "next_obs": next_obs_serial,
-                #             "done": bool(done),
-                #             # "logp": p.get("logp", None),
-                #             # "value": p.get("value", None),
-                #             # "mask": p.get("mask", None),
-                #             # "meta": {"timestamp": p.get("timestamp", None)}
-                #         }
-                #         # push to buffer
-                #         self.replay_buffer.add(transition)
-                #         self.logger.info(f"[Actor] pushed transition (reward={reward}) to buffer (buffer_size={len(self.replay_buffer)})")
-                #         # optionally upload to learner over HTTP if configured (implement Learner endpoint)
-                #         if self.learner_http_url:
-                #             threading.Thread(target=self._http_upload_single, args=([transition],), daemon=True).start()
+                with self._pending_lock:
+                    if self._pending_actions:
+                        p = self._pending_actions.pop(0)
+                        self.latest_pending = p
+                        transition = {
+                            "obs": p["obs"],
+                            "action": p["action"],
+                            # "reward": float(reward),
+                            # "next_obs": next_obs_serial,
+                            "done": bool(done),
+                            # "logp": p.get("logp", None),
+                            # "value": p.get("value", None),
+                            "mask": p.get("mask", None),
+                            # "meta": {"timestamp": p.get("timestamp", None)}
+                        }
+                        # push to buffer
+                        self.replay_buffer.add(transition)
+                        self.logger.info(f"[Actor] pushed transition (reward={reward}) to buffer (buffer_size={len(self.replay_buffer)})")
+                        # optionally upload to learner over HTTP if configured (implement Learner endpoint)
+                        if self.learner_http_url:
+                            threading.Thread(target=self._http_upload_single, args=([transition],), daemon=True).start()
 
             elif operation == "GameResult":
                 # finalize any remaining pending transitions as terminal with final reward if provided
@@ -231,8 +183,8 @@ class RLActorClient(GDTestClient):
                     next_obs_serial = []
 
                 with self._pending_lock:
-                    for p in self._pending_actions:
-                        # p = self.latest_pending
+                    if self.latest_pending:
+                        p = self.latest_pending
                         transition = {
                             "obs": p["obs"],
                             "action": p["action"],
@@ -241,7 +193,7 @@ class RLActorClient(GDTestClient):
                             "done": bool(done),
                             # "logp": p.get("logp", None),
                             # "value": p.get("value", None),
-                            # "mask": p.get("mask", None),
+                            "mask": p.get("mask", None),
                             # "meta": {"terminal": True, "timestamp": p.get("timestamp", None)}
                         }
                         self.replay_buffer.add(transition)
@@ -249,7 +201,6 @@ class RLActorClient(GDTestClient):
                         # optionally notify remote learner as above
                         if self.learner_http_url:
                             threading.Thread(target=self._http_upload_single, args=([transition],), daemon=True).start()
-                self._pending_actions = []
 
             # housekeeping: drop old pendings (timeout)
             self._drop_stale_pendings()
@@ -331,7 +282,10 @@ def run_actor(key: str, buffer: ReplayBuffer, learner_http_url: Optional[str] = 
     Instantiate agent and actor client, then run the asyncio loop.
     """
     agent = PPOAgent(state_dim=436, action_dim=1000, device=device)
-    for i in range(500):
+    agent.load_weights(
+        "/home/tao/Competition/AI_GuanDan/训练平台/GdAITest_package/GuanDan/learner/checkpoints/ppo_step9980_model.pth",
+        map_location=device)
+    for i in range(1):
         # 启动训练平台，相当于在命令行执行 ./GdAITest
         time.sleep(0.5)
         subprocess.Popen(["./GdAITest"])

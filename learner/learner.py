@@ -34,7 +34,6 @@ from storage.replay_buffer import ReplayBuffer
 # ---------------------------
 # Policy-Value network
 # ---------------------------
-# 替换 learner/learner.py 中的 PolicyValueNet 为下面代码
 class PolicyValueNet(nn.Module):
     def __init__(self, state_dim: int, action_dim: int,
                  hidden_sizes: tuple = (256, 256, 128, 64)):
@@ -394,10 +393,22 @@ class PPOLearner:
 
         # bookkeeping
         self.updates += 1
+
+        # === Explained Variance ===
+        with torch.no_grad():
+            y_pred = curr_values.detach().cpu().numpy()
+            y_true = returns.detach().cpu().numpy()
+            var_y = np.var(y_true)
+            explained_var = np.nan if var_y == 0 else 1 - np.var(y_true - y_pred) / var_y
+
+        # 打印并返回
+        print(f"[Learner] Explained Variance: {explained_var:.4f}")
+
         return {
             'policy_loss': float(policy_loss.detach().cpu().item()),
             'value_loss': float(value_loss.detach().cpu().item()),
-            'entropy': float(entropy.detach().cpu().item())
+            'entropy': float(entropy.detach().cpu().item()),
+            'explained_var': float(explained_var)
         }
 
     def save(self, prefix: str = "ppo"):
@@ -519,7 +530,8 @@ class PPOLearner:
             self._debug_batch(prepared)
 
             print(f"[Learner] Update {self.updates}: policy_loss={stats['policy_loss']:.4f}, "
-                  f"value_loss={stats['value_loss']:.4f}, entropy={stats['entropy']:.4f}, samples={len(prepared['actions'])}")
+                  f"value_loss={stats['value_loss']:.4f}, entropy={stats['entropy']:.4f}, "
+                  f"explained_var={stats['explained_var']:.4f}, samples={len(prepared['actions'])}")
             with open("train_result.txt", "a") as file:
                 # 写入 policy_loss value_loss 和 entropy 到文件
                 file.write(
