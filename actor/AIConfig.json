@@ -1,6 +1,6 @@
 {
     "gameSettings": {
-        "totalRounds": 100,    						// 总小局数（非升级模式下）
+        "totalRounds": 5000,    						// 总小局数（非升级模式下）
         "timeoutSeconds": 0, 						// 每次出牌的超时时间（秒），0为不限时
         "logLevel": "Off", 						// 日志级别（Off\Error\Warn\Info\Debug）
         "logPath": "./logs", 						// 日志文件路径

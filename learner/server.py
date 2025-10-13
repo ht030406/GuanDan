@@ -47,13 +47,13 @@ from learner import PPOLearner
 # Configurable params
 HTTP_HOST = "0.0.0.0"
 HTTP_PORT = 8000
-SAMPLES_PER_UPDATE = 100
+SAMPLES_PER_UPDATE = 2048
 FETCH_INTERVAL = 1.0
-TOTAL_UPDATES = 30000
-SAVE_EVERY = 20
+TOTAL_UPDATES = 5000
+SAVE_EVERY = 50
 DEVICE = "cuda:0"
 STATE_DIM = 436
-ACTION_DIM = 1000
+ACTION_DIM = 500
 
 app = FastAPI(title="LearnerReceiver")
 buffer = ReplayBuffer()
@@ -63,12 +63,13 @@ class TransitionModel(BaseModel):
     obs: Optional[list] = None
     action: Optional[int] = None
     reward: Optional[float] = 0.0
-    next_obs: Optional[list] = None
+    # next_obs: Optional[list] = None
     done: Optional[bool] = False
-    logp: Optional[float] = None
-    value: Optional[float] = None
-    mask: Optional[list] = None
-    meta: Optional[dict] = None
+    action_space_sparse: Optional[dict] = None
+    # logp: Optional[float] = None
+    # value: Optional[float] = None
+    # mask: Optional[list] = None
+    # meta: Optional[dict] = None
 
 class UploadModel(BaseModel):
     type: str
@@ -98,6 +99,7 @@ async def upload_trajectories(payload: UploadModel):
             "reward": float(t.reward) if t.reward is not None else 0.0,
             #"next_obs": list(t.next_obs) if t.next_obs is not None else [],
             "done": bool(t.done) if t.done is not None else False,
+            "action_space_sparse": t.action_space_sparse
             #"logp": float(t.logp) if t.logp is not None else None,
             #"value": float(t.value) if t.value is not None else None,
             #"mask": list(t.mask) if t.mask is not None else None,
@@ -142,7 +144,7 @@ def start_learner_training(buffer: ReplayBuffer,
     """
     learner = PPOLearner(state_dim=state_dim, action_dim=action_dim, buffer=buffer, device=device,
                          save_every_updates=save_every)
-    learner.load("/home/tao/Competition/AI_GuanDan/训练平台/GdAITest_package/GuanDan/learner/checkpoints/ppo_step9980.pth",)
+    # learner.load("/home/tao/Competition/AI_GuanDan/训练平台/GdAITest_package/GuanDan/learner/checkpoints/ppo_step9980.pth",)
     print("[Learner] Starting training loop")
     learner.train(total_updates=total_updates, fetch_interval=fetch_interval,
                   samples_per_update=samples_per_update, save_every=save_every)

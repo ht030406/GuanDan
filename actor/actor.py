@@ -22,8 +22,9 @@ from envs.my_client1 import GDTestClient  # preferred location based on earlier 
 import subprocess
 
 from Agent.agent import SimpleAgent, PPOAgent
+from learner.server import ACTION_DIM
 from storage.replay_buffer import ReplayBuffer
-from Agent.message2state import convert_message_to_state  # your state conversion
+from Agent.message2state import convert_message_to_state,build_semantic_bundle,build_sparse_semantic
 
 PAYOFF = {
     (1,2): 10, (2,1): 8, (1,3): 10, (3,1): 6, (1,4): 10, (4,1): 0,
@@ -74,8 +75,7 @@ class RLActorClient(GDTestClient):
         """
         try:
             # Use the same state conversion as you already use
-            state, action_mask = convert_message_to_state(
-                actions,
+            state = convert_message_to_state(
                 self.cards,
                 self.played_cards,
                 self.up_player_played,
@@ -86,10 +86,13 @@ class RLActorClient(GDTestClient):
                 self.remaining_counts_others,
                 self.wild_cards
             )
-
+            # 构造“语义掩码” bundle：加法掩码 + (牌型+点数)特征
+            bundle = build_semantic_bundle(actions, action_dim=ACTION_DIM)
+            # 构造稀疏的 “掩码+特征”
+            sprase = build_sparse_semantic(actions, action_dim=ACTION_DIM)
             # get action from agent (SimpleAgent returns index)
             # If your agent later returns (idx, logp), adapt here.
-            action_index = self.agent(state, action_mask)
+            action_index = self.agent(state, bundle)
 
             # send action to server (same as your previous behavior)
             response = {"operation": "Action", "actionIndex": int(action_index)}
@@ -99,7 +102,8 @@ class RLActorClient(GDTestClient):
             pending = {
                 "obs": state.astype(float).tolist() if hasattr(state, "astype") else state,
                 "action": int(action_index),
-                "mask": action_mask.tolist() if hasattr(action_mask, "tolist") else action_mask,
+                "action_space_sparse":sprase,
+                # "mask": action_mask.tolist() if hasattr(action_mask, "tolist") else action_mask,
                 # "logp": None,
                 # "value": None,
                 # "timestamp": time.time()
@@ -142,12 +146,12 @@ class RLActorClient(GDTestClient):
                         transition = {
                             "obs": p["obs"],
                             "action": p["action"],
-                            # "reward": float(reward),
+                            "reward": float(reward),
                             # "next_obs": next_obs_serial,
                             "done": bool(done),
                             # "logp": p.get("logp", None),
                             # "value": p.get("value", None),
-                            "mask": p.get("mask", None),
+                            "action_space_sparse": p["action_space_sparse"],
                             # "meta": {"timestamp": p.get("timestamp", None)}
                         }
                         # push to buffer
@@ -193,7 +197,7 @@ class RLActorClient(GDTestClient):
                             "done": bool(done),
                             # "logp": p.get("logp", None),
                             # "value": p.get("value", None),
-                            "mask": p.get("mask", None),
+                            "action_space_sparse": p["action_space_sparse"],
                             # "meta": {"terminal": True, "timestamp": p.get("timestamp", None)}
                         }
                         self.replay_buffer.add(transition)
@@ -281,11 +285,11 @@ def run_actor(key: str, buffer: ReplayBuffer, learner_http_url: Optional[str] = 
     """
     Instantiate agent and actor client, then run the asyncio loop.
     """
-    agent = PPOAgent(state_dim=436, action_dim=1000, device=device)
-    agent.load_weights(
-        "/home/tao/Competition/AI_GuanDan/训练平台/GdAITest_package/GuanDan/learner/checkpoints/ppo_step9980_model.pth",
-        map_location=device)
-    for i in range(1):
+    agent = PPOAgent(state_dim=436, action_dim=ACTION_DIM, device=device)
+    # agent.load_weights(
+    #     "/home/tao/Competition/AI_GuanDan/训练平台/GdAITest_package/GuanDan/learner/checkpoints/ppo_step9980_model.pth",
+    #     map_location=device)
+    for i in range(100):
         # 启动训练平台，相当于在命令行执行 ./GdAITest
         time.sleep(0.5)
         subprocess.Popen(["./GdAITest"])
@@ -303,7 +307,7 @@ def run_actor(key: str, buffer: ReplayBuffer, learner_http_url: Optional[str] = 
                 loop.run_until_complete(loop.shutdown_asyncgens())
             except Exception:
                 pass
-        winp = client.wincount / 100
+        winp = client.wincount / 5000
         print(f"胜率：{winp}")
         with open("game_result.txt", "a") as file:
             # 写入 winlist 和 final_reward 到文件

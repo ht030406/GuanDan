@@ -268,7 +268,7 @@ async def main():
     import argparse
     parser = argparse.ArgumentParser(description='掼蛋游戏测试客户端')
     parser.add_argument('key', type=str, default="a2", help='玩家唯一key(如a1、b1、a2、b2)')
-    args = parser.parse_args()
+    # args = parser.parse_args()
 
     agent = PPOAgent(state_dim=436, action_dim=1000)  # 54张牌+1轮次
     agent.load_weights(
@@ -276,7 +276,7 @@ async def main():
         map_location='cpu')
 
 
-    client = GDTestClient(args.key, agent)
+    client = GDTestClient("a2", agent)
     await client.run()
 
 

@@ -1,6 +1,7 @@
 import numpy as np
 import torch
 import torch.nn as nn
+from typing import Dict
 
 
 class SimpleAgent(nn.Module):
@@ -106,6 +107,7 @@ class PPOAgent(nn.Module):
     def __init__(self,
                  state_dim: int,
                  action_dim: int,
+                 feat_dim: int = 25,
                  hidden_sizes: Optional[Tuple[int, int, int, int]] = (256, 256, 128, 64),
                  device: Optional[Union[str, torch.device]] = None):
         """
@@ -137,29 +139,23 @@ class PPOAgent(nn.Module):
         # heads
         self.policy_head = nn.Linear(hs[3], self.action_dim)
         self.value_head = nn.Linear(hs[3], 1)
+        # 把 (type+rank) 特征映射成一个“对该 index 的额外加分/减分”
+        self.action_feat_head = nn.Sequential(
+            nn.Linear(feat_dim, hs[3] // 2),
+            nn.ReLU(),
+            nn.Linear(hs[3] // 2, 1)  # -> 标量 bias
+        )
 
         # move to device
         self.to(self.device)
         self.eval()
 
     # ---------- helpers ----------
-    def _ensure_tensor(self, state: Union[np.ndarray, list, torch.Tensor]) -> torch.Tensor:
-        """
-        Convert state to float32 tensor on self.device with shape (1, state_dim) or (B, state_dim)
-        """
-        if isinstance(state, torch.Tensor):
-            s = state.to(self.device).float()
-        else:
-            s = torch.tensor(np.asarray(state, dtype=np.float32), device=self.device)
-        if s.dim() == 1:
-            s = s.unsqueeze(0)  # (1, D)
-        elif s.dim() == 2:
-            pass
-        else:
-            raise ValueError(f"Unsupported state tensor ndim={s.dim()}")
-        if s.shape[1] != self.state_dim:
-            raise ValueError(f"State dimension mismatch: got {s.shape[1]}, expected {self.state_dim}")
-        return s
+    def _ensure_tensor(self, x):
+        if torch.is_tensor(x):
+            return x if x.ndim > 1 else x.unsqueeze(0)
+        x = torch.as_tensor(x, dtype=torch.float32)
+        return x if x.ndim > 1 else x.unsqueeze(0)
 
     def _mask_logits(self, logits: torch.Tensor, action_mask: Optional[Union[np.ndarray, list, torch.Tensor]]):
         """
@@ -195,6 +191,72 @@ class PPOAgent(nn.Module):
             masked[~row_has_valid] = logits[~row_has_valid]
         return masked
 
+    def _normalize_mask_and_feat(
+            self,action_mask: Optional[Union[np.ndarray, list, torch.Tensor, Dict]],
+            logits: torch.Tensor,
+            illegal_value: float = -1e9,
+    ):
+        """
+        统一输入成：(B,A) 的加法掩码 和 (B,A,F) 的特征（或 None）
+         - 支持传入：
+            * None：无掩码、无特征
+            * 仅掩码：(A,) 或 (B,A)，bool 或 float
+            * 语义 bundle：{'mask':(A,), 'feat':(A,F)} 或批量版
+        """
+        B, A = logits.size(0), logits.size(1)
+        device = logits.device
+
+        # 默认（无掩码、无特征）
+        add_mask = torch.zeros((B, A), dtype=torch.float32, device=device)
+        feat = None
+
+        if action_mask is None:
+            return add_mask, feat
+
+        # 语义 bundle
+        if isinstance(action_mask, dict):
+            m = action_mask.get('mask', None)
+            f = action_mask.get('feat', None)
+
+            # 处理 mask
+            if m is not None:
+                m = torch.as_tensor(m, dtype=torch.float32, device=device)
+                if m.ndim == 1:
+                    m = m.unsqueeze(0).expand(B, -1)  # (B,A)
+                elif m.ndim == 2 and m.size(0) == 1:
+                    m = m.expand(B, -1)
+                elif m.ndim != 2 or m.size(0) != B or m.size(1) != A:
+                    raise ValueError(f"mask shape must be (A,) or (B,A), got {m.shape}")
+                add_mask = m
+
+            # 处理 feat
+            if f is not None:
+                f = torch.as_tensor(f, dtype=torch.float32, device=device)  # (A,F) or (B,A,F)
+                if f.ndim == 2:
+                    f = f.unsqueeze(0).expand(B, -1, -1)  # (B,A,F)
+                elif f.ndim == 3 and f.size(0) == 1:
+                    f = f.expand(B, -1, -1)
+                elif f.ndim != 3 or f.size(0) != B or f.size(1) != A:
+                    raise ValueError(f"feat shape must be (A,F) or (B,A,F), got {f.shape}")
+                feat = f
+            return add_mask, feat
+
+        # 仅掩码（bool/float）
+        m = torch.as_tensor(action_mask, device=device)
+        if m.dtype == torch.bool:
+            if m.ndim == 1:
+                m = m.unsqueeze(0).expand(B, -1)
+            elif m.ndim == 2 and m.size(0) == 1:
+                m = m.expand(B, -1)
+            add_mask = torch.full_like(m, fill_value=illegal_value, dtype=torch.float32)
+            add_mask[m] = 0.0
+        else:
+            if m.ndim == 1:
+                m = m.unsqueeze(0).expand(B, -1)
+            elif m.ndim == 2 and m.size(0) == 1:
+                m = m.expand(B, -1)
+            add_mask = m.to(dtype=torch.float32)
+        return add_mask, feat
     # ---------- forward --------------
     def forward(self, state: Union[np.ndarray, list, torch.Tensor],
                 action_mask: Optional[Union[np.ndarray, list, torch.Tensor]] = None,
@@ -211,14 +273,34 @@ class PPOAgent(nn.Module):
         logits = self.policy_head(h)  # (B, action_dim)
         value = self.value_head(h).squeeze(-1)  # (B,)
 
-        # mask logits and compute softmax probs
-        masked_logits = self._mask_logits(logits, action_mask)
-        probs = F.softmax(masked_logits, dim=-1)
-        action_idx = torch.argmax(probs, dim=-1).item() if probs.shape[0] == 1 else torch.argmax(probs, dim=-1).cpu().numpy()
+        # 统一成 (B,A) 的加法掩码 和 (B,A,F) 的语义特征
+        add_mask, feat = self._normalize_mask_and_feat(action_mask, logits, illegal_value=-1e9)
+
+        if feat is not None:
+            # 将 (B,A,F) 逐 index 做一个小 MLP，得到 (B,A,1) 的 bias，再 squeeze -> (B,A)
+            bias = self.action_feat_head(feat).squeeze(-1)
+            # 只对合法位生效（非法位即便有 bias 也会被 -1e9 掩掉，这里可选做一层“保险”）
+            legal = (add_mask == 0.0).to(bias.dtype)
+            masked_logits = logits + add_mask + bias * legal
+        else:
+            masked_logits = logits + add_mask
+
+        # 兜底：如果某行全是 -inf（极端），回退到未掩码 logits
+        finite_any = torch.isfinite(masked_logits).any(dim=-1)
+        if not torch.all(finite_any):
+            bad = (~finite_any).nonzero(as_tuple=False).flatten()
+            masked_logits[bad] = logits[bad]
+
+        # 贪心：谁分高选谁（训练或采样才需要 softmax 概率）
+        action_idx = torch.argmax(masked_logits, dim=-1)
+        if action_idx.size(0) == 1:
+            action_idx = int(action_idx.item())
+        else:
+            action_idx = action_idx.cpu().numpy()
 
         if return_logits:
             return action_idx, masked_logits.detach().cpu().numpy()
-        return int(action_idx) if isinstance(action_idx, (np.integer, int)) else action_idx
+        return action_idx
 
     # ---------- sampling interface for training --------------
     def select_action(self, state: Union[np.ndarray, list, torch.Tensor],

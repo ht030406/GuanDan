@@ -1,4 +1,6 @@
 import asyncio
+import time
+
 import websockets
 import json
 import random
@@ -6,6 +8,7 @@ import numpy as np
 import logging
 import sys
 import os
+import subprocess
 from typing import List, Dict, Any
 from Agent.agent import SimpleAgent, PPOAgent
 from Agent.message2state import convert_message_to_state    #调用状态转换函数
@@ -266,14 +269,15 @@ async def main():
     """
     import argparse
     parser = argparse.ArgumentParser(description='掼蛋游戏测试客户端')
-    parser.add_argument('key', type=str,default="a1", help='玩家唯一key(如a1、b1、a2、b2)')
-    args = parser.parse_args()
+    parser.add_argument('key', type=str, default="a1", help='玩家唯一key(如a1、b1、a2、b2)')
+    # args = parser.parse_args()
+
 
     agent = PPOAgent(state_dim=436, action_dim=1000)  # 54张牌+1轮次
     agent.load_weights(
         "/home/tao/Competition/AI_GuanDan/训练平台/GdAITest_package/GuanDan/learner/checkpoints/ppo_latest_model_a1.pth",
         map_location='cpu')
-    client = GDTestClient(args.key,agent)
+    client = GDTestClient("a1",agent)
     await client.run()
 
 if __name__ == "__main__":

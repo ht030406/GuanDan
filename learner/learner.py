@@ -30,7 +30,9 @@ import torch.nn as nn
 import torch.optim as optim
 
 from storage.replay_buffer import ReplayBuffer
+from Agent.message2state import sparse_to_dense
 
+ACTION_DIM = 500
 # ---------------------------
 # Policy-Value network
 # ---------------------------
@@ -133,8 +135,8 @@ class PPOLearner:
                  clip_eps: float = 0.2,
                  value_coef: float = 0.5,
                  entropy_coef: float = 0.01,
-                 epochs: int = 4,
-                 minibatch_size: int = 64,
+                 epochs: int = 6,
+                 minibatch_size: int = 256,
                  max_grad_norm: float = 0.5,
                  save_dir: str = "checkpoints",
                  save_every_updates: int = 50):
@@ -167,91 +169,166 @@ class PPOLearner:
         """
         Accepts the dict returned by ReplayBuffer.get_all()
         Ensures presence and correct shapes for necessary arrays.
-        Expected keys: obs, action, reward, done, mask (optional), logp (optional), value (optional)
-        Returns a dict with torch tensors on device.
+
+        Expected required keys:  obs, action, reward, done
+        Supported optional keys:
+            - masks or mask:        (B, A) float add-mask (legal=0, illegal=-1e9), or (B, A) bool
+                                    Also accepts (A,) and will broadcast to (B, A).
+            - action_feats:         (B, A, F) float features per action index; or (A, F) and will
+                                    broadcast to (B, A, F).
+            - logp (old_logp):      previous log-prob
+            - value (old_value):    previous value
+
+        Returns a dict of torch tensors on device with keys:
+            obs, actions, rewards, dones, masks, action_feats, old_logp, old_value
         """
         if not data:
             return None
 
-        # required
-        obs = np.asarray(data.get('obs'))
-        actions = np.asarray(data.get('action'))
-        rewards = np.asarray(data.get('reward'))
-        dones = np.asarray(data.get('done')).astype(np.float32)
+        illegal_value = -1e9  # 用于把非法位钉到极小
 
-        # optional
-        masks = data.get('mask', None)  # shape (N, A) or None
-        old_logp = data.get('logp', None)
-        old_value = data.get('value', None)
+        # ---------- required ----------
 
-        # --- normalize obs/actions/rewards/dones ---
-        try:
-            obs_t = torch.tensor(np.asarray(obs, dtype=np.float32), dtype=torch.float32, device=self.device)
-        except Exception as e:
-            # provide helpful debug info
-            self.logger.error(f"[prepare_batch] failed to convert obs to float32 array: type={type(obs)}, sample0={str(obs)[:200]}, err={e}")
-            raise
+        obs_np = np.asarray(data.get('obs'))
+        actions_np = np.asarray(data.get('action'))
+        rewards_np = np.asarray(data.get('reward'))
+        dones_np = np.asarray(data.get('done')).astype(np.float32)
 
-        try:
-            actions_t = torch.tensor(np.asarray(actions, dtype=np.int64), dtype=torch.long, device=self.device)
-        except Exception as e:
-            self.logger.error(f"[prepare_batch] failed to convert actions to int64: sample={str(actions)[:200]}, err={e}")
-            raise
 
-        try:
-            rewards_t = torch.tensor(np.asarray(rewards, dtype=np.float32), dtype=torch.float32, device=self.device)
-        except Exception as e:
-            self.logger.error(f"[prepare_batch] failed to convert rewards to float32: sample={str(rewards)[:200]}, err={e}")
-            raise
+        B = len(actions_np)
+        device = getattr(self, "device", torch.device("cuda" if torch.cuda.is_available() else "cpu"))
+        action_dim_attr = getattr(self, "action_dim", None)  # 可用于校验 A
 
-        try:
-            dones_t = torch.tensor(np.asarray(dones, dtype=np.float32), dtype=torch.float32, device=self.device)
-        except Exception as e:
-            self.logger.error(f"[prepare_batch] failed to convert dones to float32: sample={str(dones)[:200]}, err={e}")
-            raise
+        # ---------- optional: masks / mask ----------
+        masks_in = data.get('masks', None)
+        if masks_in is None:
+            masks_in = data.get('mask', None)
 
-        # --- masks ---
         masks_t = None
-        if masks is not None:
+        A_from_masks = None
+        if masks_in is not None:
             try:
-                masks_arr = np.asarray(masks)
-                # if masks is 1-D for single sample, expand to 2D
+                masks_arr = np.asarray(masks_in)
+                # 单样本/一维情况：统一扩成 (B, A)
                 if masks_arr.ndim == 1:
-                    masks_arr = masks_arr.reshape(1, -1)
-                masks_t = torch.tensor(masks_arr.astype(np.float32), dtype=torch.float32, device=self.device)
-            except Exception as e:
-                # best-effort: try to coerce each mask row to list of ints
-                try:
-                    normalized = []
-                    for i, row in enumerate(masks):
-                        try:
-                            normalized.append(np.asarray(row, dtype=np.float32))
-                        except Exception:
-                            # fallback: build zero mask with expected action_dim if available
-                            normalized.append(np.zeros(self.action_dim, dtype=np.float32))
-                            self.logger.warning(f"[prepare_batch] could not parse mask row {i}, using zeros")
-                    masks_arr = np.stack(normalized, axis=0)
-                    masks_t = torch.tensor(masks_arr, dtype=torch.float32, device=self.device)
-                except Exception as e2:
-                    self.logger.error(f"[prepare_batch] failed to parse masks: err1={e}, err2={e2}")
-                    masks_t = None
+                    A_from_masks = masks_arr.shape[0]
+                    masks_arr = masks_arr.reshape(1, -1).repeat(B, axis=0)
+                elif masks_arr.ndim == 2:
+                    if masks_arr.shape[0] == 1 and B > 1:
+                        A_from_masks = masks_arr.shape[1]
+                        masks_arr = masks_arr.repeat(B, axis=0)
+                    else:
+                        A_from_masks = masks_arr.shape[1]
+                        if masks_arr.shape[0] != B:
+                            raise ValueError(f"masks batch dim {masks_arr.shape[0]} != B {B}")
+                else:
+                    raise ValueError(f"masks must have ndim 1 or 2, got {masks_arr.ndim}")
 
-        # --- old_logp and old_value: robust conversion from possibly object-dtype arrays ---
+                # bool 掩码 -> 加法掩码；float 掩码直接转 float32
+                if masks_arr.dtype == np.bool_:
+                    add_mask = np.full_like(masks_arr, fill_value=illegal_value, dtype=np.float32)
+                    add_mask[masks_arr] = 0.0
+                    masks_arr = add_mask
+                else:
+                    masks_arr = masks_arr.astype(np.float32)
+
+                masks_t = torch.tensor(masks_arr, dtype=torch.float32, device=device)
+            except Exception as e:
+                self.logger.error(f"[prepare_batch] failed to parse masks: {e}")
+                masks_t = None
+
+        # ---------- optional: action_feats ----------
+        feats_in = data.get('action_feats', None)
+        action_feats_t = None
+        A_from_feats = None
+        F_from_feats = None
+        if feats_in is not None:
+            try:
+                feats_arr = np.asarray(feats_in)
+                if feats_arr.ndim == 2:
+                    # (A, F) -> 广播到 (B, A, F)
+                    A_from_feats, F_from_feats = feats_arr.shape
+                    feats_arr = feats_arr.reshape(1, A_from_feats, F_from_feats).repeat(B, axis=0)
+                elif feats_arr.ndim == 3:
+                    if feats_arr.shape[0] == 1 and B > 1:
+                        A_from_feats, F_from_feats = feats_arr.shape[1], feats_arr.shape[2]
+                        feats_arr = feats_arr.repeat(B, 1, 1)
+                    else:
+                        if feats_arr.shape[0] != B:
+                            raise ValueError(f"action_feats batch dim {feats_arr.shape[0]} != B {B}")
+                        A_from_feats, F_from_feats = feats_arr.shape[1], feats_arr.shape[2]
+                else:
+                    raise ValueError(f"action_feats must have ndim 2 or 3, got {feats_arr.ndim}")
+
+                feats_arr = feats_arr.astype(np.float32)
+                action_feats_t = torch.tensor(feats_arr, dtype=torch.float32, device=device)
+            except Exception as e:
+                self.logger.error(f"[prepare_batch] failed to parse action_feats: {e}")
+                action_feats_t = None
+
+        # ---------- infer / validate action_dim (A) ----------
+        inferred_A = None
+        if A_from_masks is not None and A_from_feats is not None:
+            if A_from_masks != A_from_feats:
+                self.logger.error(
+                    f"[prepare_batch] A mismatch: masks A={A_from_masks} vs action_feats A={A_from_feats}")
+            inferred_A = A_from_masks
+        elif A_from_masks is not None:
+            inferred_A = A_from_masks
+        elif A_from_feats is not None:
+            inferred_A = A_from_feats
+
+        if action_dim_attr is not None and inferred_A is not None and action_dim_attr != inferred_A:
+            self.logger.warning(
+                f"[prepare_batch] action_dim attr ({action_dim_attr}) != inferred A ({inferred_A}); using tensors as-is.")
+
+        # ---------- convert required tensors ----------
+        # obs：尽量转 float32，支持 (B, D) 或单样本 (D,)
+        try:
+            obs_t = torch.tensor(np.asarray(obs_np, dtype=np.float32), dtype=torch.float32, device=device)
+            if obs_t.ndim == 1:
+                obs_t = obs_t.unsqueeze(0)
+            if obs_t.shape[0] != B:
+                # 尝试广播/重复
+                if obs_t.shape[0] == 1:
+                    obs_t = obs_t.repeat(B, 1)
+                else:
+                    raise ValueError(f"obs batch dim {obs_t.shape[0]} != B {B}")
+        except Exception as e:
+            self.logger.error(f"[prepare_batch] failed to convert obs to float32 tensor: {e}")
+            raise
+
+        try:
+            actions_t = torch.tensor(np.asarray(actions_np, dtype=np.int64), dtype=torch.long, device=device).view(-1)
+        except Exception as e:
+            self.logger.error(f"[prepare_batch] failed to convert action to long tensor: {e}")
+            raise
+
+        try:
+            rewards_t = torch.tensor(np.asarray(rewards_np, dtype=np.float32), dtype=torch.float32, device=device).view(
+                -1)
+        except Exception as e:
+            self.logger.error(f"[prepare_batch] failed to convert reward to float32 tensor: {e}")
+            raise
+
+        try:
+            dones_t = torch.tensor(np.asarray(dones_np, dtype=np.float32), dtype=torch.float32, device=device).view(-1)
+        except Exception as e:
+            self.logger.error(f"[prepare_batch] failed to convert done to float32 tensor: {e}")
+            raise
+
+        # ---------- optional: old_logp / old_value ----------
         def _to_float_tensor(candidate, name, fill_value=0.0):
             if candidate is None:
                 return None
-            # Try direct numpy conversion first
             try:
                 arr = np.asarray(candidate)
             except Exception:
-                # fallback: try to iterate and build list
                 try:
                     arr = np.array([x for x in candidate])
                 except Exception:
                     self.logger.error(f"[prepare_batch] cannot convert {name} to numpy array; returning None")
                     return None
-
-            # If object dtype, convert elementwise
             if arr.dtype == np.dtype('O'):
                 flat = []
                 bad_idx = []
@@ -262,40 +339,45 @@ class PPOLearner:
                         else:
                             flat.append(float(v))
                     except Exception:
-                        # try to handle numpy scalar etc.
                         try:
                             flat.append(float(np.asarray(v).item()))
                         except Exception:
-                            flat.append(float(fill_value))
+                            flat.append(float(fill_value));
                             bad_idx.append(i)
                 if bad_idx:
-                    self.logger.warning(f"[prepare_batch] {name} contains {len(bad_idx)} non-numeric entries; indices sample: {bad_idx[:5]}")
+                    self.logger.warning(
+                        f"[prepare_batch] {name} contains {len(bad_idx)} non-numeric entries; sample idx: {bad_idx[:5]}")
                 arr = np.asarray(flat, dtype=np.float32)
             else:
-                # ensure numeric dtype
                 try:
                     arr = arr.astype(np.float32)
                 except Exception:
-                    # final fallback: convert itemwise
                     arr = np.array([float(x) if x is not None else fill_value for x in arr], dtype=np.float32)
-            # convert to tensor
             try:
-                return torch.tensor(arr, dtype=torch.float32, device=self.device)
+                t = torch.tensor(arr, dtype=torch.float32, device=device).view(-1)
+                if len(t) != B:
+                    if len(t) == 1:
+                        t = t.repeat(B)
+                    else:
+                        self.logger.warning(f"[prepare_batch] {name} batch dim {len(t)} != B {B}; keeping as-is")
+                return t
             except Exception as e:
-                self.logger.error(f"[prepare_batch] failed to convert {name} array to tensor: err={e}, sample={str(arr)[:200]}")
+                self.logger.error(f"[prepare_batch] failed to convert {name} to tensor: {e}")
                 return None
 
-        old_logp_t = _to_float_tensor(old_logp, "old_logp", fill_value=0.0)
-        old_value_t = _to_float_tensor(old_value, "old_value", fill_value=0.0)
+        old_logp_t = _to_float_tensor(data.get('logp', data.get('old_logp', None)), "old_logp", 0.0)
+        old_value_t = _to_float_tensor(data.get('value', data.get('old_value', None)), "old_value", 0.0)
 
+        # ---------- final dict ----------
         return {
-            'obs': obs_t,
-            'actions': actions_t,
-            'rewards': rewards_t,
-            'dones': dones_t,
-            'masks': masks_t,
-            'old_logp': old_logp_t,
-            'old_value': old_value_t
+            'obs': obs_t,  # (B, D)
+            'actions': actions_t,  # (B,)
+            'rewards': rewards_t,  # (B,)
+            'dones': dones_t,  # (B,)
+            'masks': masks_t,  # (B, A) or None
+            'action_feats': action_feats_t,  # (B, A, F) or None
+            'old_logp': old_logp_t,  # (B,) or None
+            'old_value': old_value_t,  # (B,) or None
         }
 
     def compute_gae_returns(self, rewards: torch.Tensor, dones: torch.Tensor, values: torch.Tensor, last_value: float = 0.0):
@@ -324,34 +406,82 @@ class PPOLearner:
         """
         Do PPO update for one epoch over the provided batch (which is a dict with tensors).
         We'll use multiple minibatches outside this function (in train).
-        batch contains tensors: obs, actions, rewards, dones, masks, old_logp, old_value
+        batch contains tensors:
+            obs, actions, rewards, dones,
+            masks: (B,A) float add-mask (legal=0, illegal=-1e9) or None
+            action_feats: (B,A,F) float (仅牌型+点数 one-hot) or None
+            old_logp, old_value (optional)
         """
-        obs = batch['obs']
-        actions = batch['actions']
-        masks = batch.get('masks', None)
-        old_logp = batch.get('old_logp', None)
-        old_value = batch.get('old_value', None)
-        rewards = batch['rewards']
-        dones = batch['dones']
+        device = self.device
+        obs = batch['obs']  # (B, D)
+        actions = batch['actions']  # (B,)
+        rewards = batch['rewards']  # (B,)
+        dones = batch['dones']  # (B,)
+        masks = batch.get('masks', None)  # (B, A) or None
+        action_feats = batch.get('action_feats', None)  # (B, A, F) or None
+        old_logp = batch.get('old_logp', None)  # (B,) or None
+        old_value = batch.get('old_value', None)  # (B,) or None
 
-        # compute values and logp under current policy
+        # ---- 懒加载 “动作语义 → bias” 的小网络头（作用：对每个 index 生成加分/减分）----
+        # 这样不用改你的 PolicyValueNet；并把参数加进已有 optimizer。
+        if action_feats is not None and not hasattr(self, "action_feat_head"):
+            self.action_feat_head = torch.nn.Sequential(
+                torch.nn.Linear(25, 32),
+                torch.nn.ReLU(),
+                torch.nn.Linear(32, 1)  # 每个 index 输出一个标量 bias
+            ).to(device)
+            # 把新头的参数加入优化器
+            try:
+                self.optimizer.add_param_group({'params': self.action_feat_head.parameters()})
+            except Exception:
+                # 某些优化器不支持 add_param_group 时，至少给个提示
+                print("[ppo_update] Warning: optimizer.add_param_group failed; "
+                      "ensure action_feat_head params are optimized.")
+
+        # ---- 一个小工具：把 logits、masks、action_feats 合成为 masked_logits ----
+        def _compose_masked_logits(logits: torch.Tensor,
+                                   masks: Optional[torch.Tensor],
+                                   action_feats: Optional[torch.Tensor]) -> torch.Tensor:
+            """
+            logits: (B, A) 来自 policy_head
+            masks:  (B, A) 加法掩码（legal=0, illegal=-1e9）；None 表示全合法
+            action_feats: (B, A, F) 仅“牌型+点数”特征；None 表示不加语义 bias
+            return: masked_logits: (B, A)
+            """
+            if masks is None:
+                masks = torch.zeros_like(logits)
+            if action_feats is not None and hasattr(self, "action_feat_head"):
+                # 对每个 index 的 (F,) 生成一个 bias 标量
+                bias = self.action_feat_head(action_feats).squeeze(-1)  # (B, A)
+                # 只在“合法位”加 bias（非法位反正会被 -1e9 掩掉，这里再乘一次保险）
+                legal = (masks == 0.0).to(logits.dtype)  # (B, A) in {0,1}
+                return logits + masks + bias * legal
+            else:
+                return logits + masks
+
+        # ===================== 计算当前策略的 logp / value（no_grad） =====================
         with torch.no_grad():
-            logits, values = self.model(obs)
-            probs, log_probs_all = masked_logits_to_probs(logits, masks)
-            curr_logp = gather_log_probs(log_probs_all, actions)  # (N,)
-            curr_values = values
+            logits_all, values_all = self.model(obs)  # (B, A), (B,)
+            masked_logits_all = _compose_masked_logits(logits_all, masks, action_feats)  # (B, A)
+            log_probs_all = torch.log_softmax(masked_logits_all, dim=-1)  # (B, A)
+            # 选中动作的 logp
+            curr_logp = log_probs_all.gather(1, actions.unsqueeze(1)).squeeze(1)  # (B,)
+            curr_values = values_all  # (B,)
 
-        # If old_logp/old_value not provided, fallback to current (warning)
+        # ---- old_logp / old_value 缺省时回退到当前 ----
         if old_logp is None:
             old_logp = curr_logp.detach()
         if old_value is None:
             old_value = curr_values.detach()
 
-        # compute advantages & returns (GAE)
-        advantages, returns = self.compute_gae_returns(rewards, dones, old_value, last_value=old_value[-1].item() if old_value.shape[0] > 0 else 0.0)
+        # ===================== GAE 优势 / 回报 =====================
+        advantages, returns = self.compute_gae_returns(
+            rewards, dones, old_value,
+            last_value=old_value[-1].item() if old_value.shape[0] > 0 else 0.0
+        )
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
-        # Now perform multiple epochs of minibatch SGD
+        # ===================== 多 epoch / mini-batch 训练 =====================
         N = obs.shape[0]
         idxs = np.arange(N)
         for epoch in range(self.epochs):
@@ -364,44 +494,52 @@ class PPOLearner:
                 mb_actions = actions[mb_idx_t]
                 mb_returns = returns[mb_idx_t].detach()
                 mb_adv = advantages[mb_idx_t].detach()
-                mb_masks = masks[mb_idx_t] if masks is not None else None
                 mb_old_logp = old_logp[mb_idx_t].detach()
-                mb_old_value = old_value[mb_idx_t].detach()
+                mb_old_val = old_value[mb_idx_t].detach()
 
-                logits, values = self.model(mb_obs)
-                probs, log_probs_all = masked_logits_to_probs(logits, mb_masks)
-                new_logp = gather_log_probs(log_probs_all, mb_actions)
+                mb_masks = masks[mb_idx_t] if masks is not None else None
+                mb_feats = action_feats[mb_idx_t] if action_feats is not None else None
 
-                ratio = torch.exp(new_logp - mb_old_logp)
+                # 前向：当前策略
+                logits, values = self.model(mb_obs)  # (Mb, A),(Mb,)
+                masked_logits = _compose_masked_logits(logits, mb_masks, mb_feats)  # (Mb, A)
+
+                log_probs_all = torch.log_softmax(masked_logits, dim=-1)  # (Mb, A)
+                new_logp = log_probs_all.gather(1, mb_actions.unsqueeze(1)).squeeze(1)  # (Mb,)
+
+                # PPO-clip
+                ratio = torch.exp(new_logp - mb_old_logp)  # (Mb,)
                 surr1 = ratio * mb_adv
                 surr2 = torch.clamp(ratio, 1.0 - self.clip_eps, 1.0 + self.clip_eps) * mb_adv
                 policy_loss = -torch.mean(torch.min(surr1, surr2))
 
-                # value loss
+                # Value loss
                 value_loss = torch.mean((values - mb_returns) ** 2)
 
-                # entropy
-                entropy = torch.mean(masked_entropy(probs, mb_masks))
+                # Entropy（基于 masked_logits 的分布）
+                probs = torch.softmax(masked_logits, dim=-1)  # (Mb, A)
+                entropy = -torch.sum(probs * log_probs_all, dim=-1).mean()
 
+                # 总损失
                 loss = policy_loss + self.value_coef * value_loss - self.entropy_coef * entropy
 
-                # optimization step
+                # 优化
                 self.optimizer.zero_grad()
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
+                # 如果我们懒加载了 action_feat_head，也需要裁剪/优化它的梯度
+                if hasattr(self, "action_feat_head"):
+                    torch.nn.utils.clip_grad_norm_(self.action_feat_head.parameters(), self.max_grad_norm)
                 self.optimizer.step()
 
-        # bookkeeping
+        # ===================== 事后统计 =====================
         self.updates += 1
-
-        # === Explained Variance ===
         with torch.no_grad():
             y_pred = curr_values.detach().cpu().numpy()
             y_true = returns.detach().cpu().numpy()
             var_y = np.var(y_true)
             explained_var = np.nan if var_y == 0 else 1 - np.var(y_true - y_pred) / var_y
 
-        # 打印并返回
         print(f"[Learner] Explained Variance: {explained_var:.4f}")
 
         return {
@@ -472,10 +610,10 @@ class PPOLearner:
         print("===================")
 
     def train(self,
-              total_updates: int = 1000,
+              total_updates: int = 30000,
               fetch_interval: float = 1.0,
-              samples_per_update: int = 2048,
-              save_every: int = 50):
+              samples_per_update: int = 100,
+              save_every: int = 20):
         """
         Main training loop.
         - total_updates: number of learner update iterations
@@ -508,22 +646,27 @@ class PPOLearner:
                     batch[k] = np.asarray(batch[k])
                 except Exception:
                     batch[k] = np.asarray(batch[k], dtype=object)
-
+            # === 新增：把 action_space_sparse -> 稠密 masks / action_feats ===
+            sparse_list = list(batch['action_space_sparse'])  # 长度=B
+            masks_np, feats_np = sparse_to_dense(sparse_list)
+            # 塞回 batch，让 prepare_batch 把它们转成 tensor
+            batch['masks'] = masks_np  # shape (B, A), float32
+            batch['action_feats'] = feats_np  # shape (B, A, FEAT_DIM), float32
             # prepare tensors
             prepared = self.prepare_batch(batch)
             if prepared is None:
                 continue
 
             # if prepared missing old_logp or old_value, compute via current policy
-            if prepared['old_logp'] is None or prepared['old_value'] is None:
-                with torch.no_grad():
-                    logits, values = self.model(prepared['obs'])
-                    probs, log_probs_all = masked_logits_to_probs(logits, prepared['masks'])
-                    curr_logp = gather_log_probs(log_probs_all, prepared['actions'])
-                if prepared['old_logp'] is None:
-                    prepared['old_logp'] = curr_logp.detach()
-                if prepared['old_value'] is None:
-                    prepared['old_value'] = values.detach()
+            # if prepared['old_logp'] is None or prepared['old_value'] is None:
+            #     with torch.no_grad():
+            #         logits, values = self.model(prepared['obs'])
+            #         probs, log_probs_all = masked_logits_to_probs(logits, prepared['masks'])
+            #         curr_logp = gather_log_probs(log_probs_all, prepared['actions'])
+            #     if prepared['old_logp'] is None:
+            #         prepared['old_logp'] = curr_logp.detach()
+            #     if prepared['old_value'] is None:
+            #         prepared['old_value'] = values.detach()
 
             # call update (this function does multiple epochs internally)
             stats = self.ppo_update(prepared)
